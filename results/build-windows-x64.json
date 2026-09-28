@@ -1,0 +1,15 @@
+{
+  "project": "0xBOF",
+  "version": "1.0.0",
+  "target": "Windows x64",
+  "configuration": "Release",
+  "compiler": "MSVC 19.44.35228.0",
+  "openssl": "3.6.4",
+  "boost": "1.92.0",
+  "nlohmann_json": "3.12.0",
+  "tests": "not run for this release",
+  "binaries": {
+    "0xbof.exe": "77567bacd7374866d92ee2dd1fe75b7d62599e3b3a43d01ba81a8a246b0fbc9f",
+    "0xbof-benchmark.exe": "5bb12f522dad4314bb018df7efcf94362a9ba7005dcb173bc307781e8000fdc1"
+  }
+}

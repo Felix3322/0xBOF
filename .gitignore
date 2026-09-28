@@ -1,0 +1,9 @@
+/build*/
+/vcpkg_installed/
+/.vs/
+/.idea/
+__pycache__/
+*.pyc
+*.key
+*.ecl
+*.eclmeta

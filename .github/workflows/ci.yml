@@ -1,0 +1,64 @@
+name: C++ build and tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [release, sanitizers]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libssl-dev libboost-dev nlohmann-json3-dev
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.mode == 'release' && 'Release' || 'Debug' }}
+          -DECL_SANITIZERS=${{ matrix.mode == 'sanitizers' && 'ON' || 'OFF' }}
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      - name: Benchmark
+        if: matrix.mode == 'release'
+        run: ./build/0xbof-benchmark --synthetic --output-dir build/benchmark
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-${{ matrix.mode }}-test-logs
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/benchmark/
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
+          git -C "$env:RUNNER_TEMP/vcpkg" checkout 07f4812200df3d3c931c0c8a6081d3b21fe2bf9f
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:RUNNER_TEMP/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+      - run: cmake --build build --config Release --parallel 2
+      - run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-logs
+          path: build/Testing/Temporary/LastTest.log
