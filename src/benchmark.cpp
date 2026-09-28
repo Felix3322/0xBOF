@@ -25,12 +25,12 @@ Bytes synthetic_pe() {
 int run(const std::vector<std::string>& argv) {
     if (argv.empty() || argv[0] == "--help") {
         std::cout << "0xBOF benchmark " << version << "\n"
-            "Usage: 0xbof-benchmark (--input FILE | --synthetic) --output-dir DIR\n"
+            "Usage: 0xbof-benchmark (--input FILE | --synthetic) --output-dir DIR [--template PATH]\n"
             "PUBLIC TEST KEY ONLY. Use only public, non-sensitive inputs.\n"
             "Writes benchmark.json and benchmark.csv without overwriting existing results.\n";
         return 0;
     }
-    cli::Arguments args(argv, {"--input", "--output-dir"}, {"--synthetic"});
+    cli::Arguments args(argv, {"--input", "--output-dir", "--template"}, {"--synthetic"});
     if (!args.positional.empty() || args.values.contains("--input") == args.flags.contains("--synthetic"))
         throw Error("select exactly one of --input or --synthetic");
     const auto out = cli::path(args.required("--output-dir"));
@@ -42,11 +42,17 @@ int run(const std::vector<std::string>& argv) {
     Json pe = nullptr;
     try { pe = check_pe(data); } catch (const Error&) {}
     Json rows = Json::array();
+    std::optional<Counts> shared;
+    if (args.values.contains("--template")) {
+        const auto raw = read_limited(cli::path(args.required("--template")), 64 * 1024);
+        shared = parse_public_template(Json::parse(raw.begin(), raw.end()));
+    }
     for (int profile = 1; profile <= 2; ++profile) {
         for (auto layout : {Layout::detached, Layout::embedded}) {
             Options options;
             options.profile = profile; options.layout = layout;
-            options.budget = profile == 2 || profile == 3 ? "0" : "0.25";
+            options.budget = profile == 2 ? "0" : "0.25";
+            options.public_template = shared;
             std::optional<Encrypted> encrypted;
             const auto start = Clock::now();
             try { encrypted = encrypt(data, key, options); }
@@ -56,6 +62,9 @@ int run(const std::vector<std::string>& argv) {
                 continue;
             }
             auto row = encrypted->report;
+            row["plain_bytes"] = data.size();
+            row["plain_entropy_bits_per_byte"] = entropy(histogram(data));
+            row["entropy_delta_bits_per_byte"] = entropy(histogram(encrypted->ciphertext)) - entropy(histogram(data));
             row["encrypt_seconds"] = seconds(start);
             const auto decrypt_start = Clock::now();
             const auto recovered = decrypt(encrypted->ciphertext, key, encrypted->sidecar);
@@ -68,12 +77,18 @@ int run(const std::vector<std::string>& argv) {
     Json curve = Json::array();
     for (const auto* budget : {"0", "0.05", "0.1", "0.25", "0.5", "1.0"}) {
         Options options; options.profile = 1; options.budget = budget;
-        const auto encrypted = encrypt(data, key, options);
-        if (decrypt(encrypted.ciphertext, key, encrypted.sidecar).plaintext != data)
+        options.public_template = shared;
+        std::optional<Encrypted> encrypted;
+        try { encrypted = encrypt(data, key, options); }
+        catch (const Error& error) {
+            curve.push_back({{"budget", budget}, {"status", "unsupported"}, {"reason", error.what()}});
+            continue;
+        }
+        if (decrypt(encrypted->ciphertext, key, encrypted->sidecar).plaintext != data)
             throw Error("budget curve roundtrip mismatch");
-        curve.push_back({{"budget", encrypted.report["budget_bits_per_byte"]},
-                         {"entropy", encrypted.report["cipher_entropy_bits_per_byte"]},
-                         {"delta", encrypted.report["entropy_delta_bits_per_byte"]}});
+        curve.push_back({{"budget", encrypted->report["budget_bits_per_byte"]}, {"status", "pass"},
+                         {"entropy", encrypted->report["cipher_entropy_bits_per_byte"]},
+                         {"delta", entropy(histogram(encrypted->ciphertext)) - entropy(histogram(data))}});
     }
     Bytes nonce(12); std::iota(nonce.begin(), nonce.end(), Byte(0));
     const auto baseline = detail::aes_gcm_encrypt(key, nonce, data, cli::encoded("ECL benchmark baseline"));

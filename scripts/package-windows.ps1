@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$OutputDir,
-    [string]$Version = '1.0.0'
+    [string]$Version = '1.0.1'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -18,6 +18,12 @@ foreach ($binaryName in @('0xbof.exe','0xbof-benchmark.exe')) {
 }
 $reportedVersion = & (Join-Path $binaryRoot '0xbof.exe') --version
 if ($LASTEXITCODE -ne 0 -or $reportedVersion.Trim() -ne $Version) { throw 'Executable version does not match package version' }
+$buildManifest = Get-Content -LiteralPath (Join-Path $projectRoot 'results/build-windows-x64.json') -Raw | ConvertFrom-Json
+if ($buildManifest.version -ne $Version) { throw 'Create the matching build manifest before packaging this version' }
+foreach ($binaryName in @('0xbof.exe','0xbof-benchmark.exe')) {
+    $binaryHash = (Get-FileHash -LiteralPath (Join-Path $binaryRoot $binaryName) -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($buildManifest.binaries.$binaryName -ne $binaryHash) { throw "Build manifest hash mismatch: $binaryName" }
+}
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 $stagingRoot = Join-Path ([IO.Path]::GetFullPath($BuildDir)) ('package-' + [Guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $stagingRoot $packageName

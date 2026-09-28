@@ -1,17 +1,66 @@
-# 0xBOF C++ implementation and file format
+# 0xBOF 1.0.1 共享分布格式
 
-0xBOF 1.0.0 is a C++20 application and library. The on-disk format is `ECLAB001`, format version 1. This document describes the current implementation.
+本版新增 ECLAB002，保留 ECLAB001 的兼容解密路径。以下描述代码设计，不是编译、测试或审计结论。
 
-Two profiles are supported. Profile 1 shapes the output histogram within a caller-selected entropy budget. Profile 2 preserves the sorted normalized histogram exactly and requires a zero budget. The profiles work with either detached or embedded storage.
+## 公开类别与模板
 
-Budget shaping transfers counts from high-frequency bins to low-frequency bins, breaking ties by byte value. The final policy check uses 100-digit decimal arithmetic. The exact profile checks an integer histogram certificate without floating point tolerance.
+模板 q 是 256 项无符号 64 位频数，和为原始长度 N。共享同一 q、长度、budget、profile 和布局的输入使用相同的公开分布、填充记录长度及附属文件长度。
 
-The 80-byte authenticated header contains magic and format version, profile, layout, plaintext and output lengths, budget, nonce, and output-histogram digest. AES-256-GCM authenticates the header and payload. HKDF-SHA256 derives separate keys for rank encryption, private metadata, and histogram relabeling. Detached mode stores private metadata in a fixed 2,213-byte sidecar. Embedded mode encodes the authenticated record in a single file and scales the histogram by an integer factor.
+预算模式无显式模板时，在由 N 和 budget 确定的公开网格上选择模板。网格间距为 max(1, floor(budget_units/2))，单位为 10^-12 bits/byte。每个网格目标生成一个单峰、其余 255 桶均衡的整数频数表；选择覆盖输入熵的第一个模板。模板值由公开长度与网格决定，输入只用于决定所属类别。离散分布无法覆盖时明确拒绝，不退回逐文件频数塑形。
 
-Rank/unrank use exact multinomial arithmetic and a Fenwick tree. The private record contains the original histogram and SHA-256 digest; decryption authenticates metadata before reconstructing plaintext and verifies the digest afterward.
+严格模式或零预算模式要求显式共享模板。对同一 N，精确比较 product(c^c)；代码通过 gcd 拆分底数、合并整数指数判断相等，避免直接生成 N*log(N) 位的乘积。它允许不同频数集合严格等熵，例如 [4,1,1,1,1] 和 [2,2,2,2]。没有实现任意文件的全体等熵模板枚举。模板独立于秘密输入是部署要求，文件格式本身不能验证这一点。
 
-The default file-size limit is unlimited; explicit limits remain available through the CLI and library. Enumerative operations can require significant compute and memory for large files.
+## 固定头部
 
-The composition has not received an independent cryptographic audit. Entropy constraints cover the whole main output, not every window, and frequency distributions and lengths can leak information. Authentication does not provide replay protection or key rotation. The tool does not execute files or install a runtime loader.
+头部共 2,116 字节，整数为大端：
 
-Library references: [OpenSSL EVP](https://docs.openssl.org/3.5/man3/EVP_EncryptInit/), [HKDF](https://docs.openssl.org/3.5/man3/EVP_PKEY_CTX_set_hkdf_md/), and [Boost.Multiprecision](https://www.boost.org/library/latest/multiprecision/).
+| 偏移 | 字节数 | 字段 |
+| --- | --- | --- |
+| 0 | 8 | ECLAB002 |
+| 8 | 1 | 格式版本 2 |
+| 9 | 1 | profile 1 或 2 |
+| 10 | 1 | detached=0，embedded=1 |
+| 11 | 1 | 保留，必须为 0 |
+| 12 | 8 | 原始长度 N |
+| 20 | 8 | 主输出长度 |
+| 28 | 8 | 预算，单位 10^-12 bits/byte |
+| 36 | 32 | 随机文件 salt |
+| 68 | 2048 | 256 项公开模板频数 |
+
+记录宽度仅由 q 决定：w=min(N,ceil(N*H(q)/8)+1)。熵计算使用 100 位十进制，额外一字节保守余量；编码同时检查 rank 是否实际适配此宽度。认证明文是 2,048 字节原始频数表和固定 w 字节的排列 rank，不含可公开识别原文件的明文摘要。频数与 rank 是原文的完整可逆表示。
+
+## 密钥与认证
+
+主密钥为随机 32 字节；每个文件生成随机 32 字节 salt。HKDF-SHA256 以 0xBOF/ECLAB002/ 开头的用途标签派生 payload 和 detached-transport 密钥，隔离旧格式和不同用途。
+
+认证明文划分成最多 1 MiB 的固定分块，每块使用 OpenSSL AES-256-GCM-SIV，块末附 16 字节 tag。nonce 为 4 字节零和 8 字节大端块序号。AAD 为整个固定头部、块序号、总块数、认证明文总长度。分块解决单次 EVP 调用长度限制，不构成全文件流式实现。
+
+在分块密文之后追加 32 字节 HMAC-SHA256，对整个头部和分块密文进行认证。此密钥由 payload 密钥、文件 salt 和 record-auth 用途标签单独派生。即使误复用 salt，也不能把不同记录的有效分块拼接为另一份有效记录。所有块及整记录认证完成后才恢复原文。
+
+随机 salt 仍必须保持新鲜。相同 salt、类别和块序号下，相同明文块的相等性可能可见；GCM-SIV 不代表可以忽略随机数管理。实现调用 OpenSSL 的成熟密码原语，没有自行实现 AES 或 POLYVAL。
+
+## detached 编码
+
+令 Q=N!/product(q_i!)，k=floor(log2(Q))。完整认证密文整数 x 的低 k 位通过 unrank 编码为 q 分布的等长主文件；高位保存为固定宽度溢出记录。仅使用前 2^k 个码字，解码拒绝超出范围的码字和非零高位填充。
+
+附属文件为头部、溢出记录及 32 字节外层 HMAC。外层 HMAC 绑定头部、溢出记录及主文件全部字节，使用 detached-transport 密钥。解码在进行大整数枚举编号前验证它，随后重建认证密文并验证整记录和各分块。
+
+若认证密文有 E 字节，附属文件长度为 2116 + ceil((8E-k)/8) + 32。本版使用 64 位频数及整记录、外层认证，因此不是附件原型的固定 2,188 字节，也不是旧格式的 2,213 字节。相同公开类别的附属长度一致。
+
+## embedded 编码
+
+帧为头部和完整认证密文，以前导 1 位哨兵构成整数。选择满足容量要求的最小整数扩展倍数 f，将帧编号编码为 f*q 的排列。容量选择只依赖公开类及固定记录长度，与原始频数细节和随机密文无关。整个输出的熵与 q 一致。
+
+解码从实际直方图恢复帧，检查哨兵、准确帧长、原始长度、整倍扩展、头部模板与实际频数一致性，然后验证认证记录。embedded 必须先执行编号才能读取认证信息；默认无限大小不等于抵御任意规模的计算资源消耗，应按使用场景指定输入限额。空模板或零熵模板不能容纳 embedded 记录。
+
+## 边界与报告
+
+默认未设置处理文件字节数上限；仍检查整数溢出、容器表示能力、记录结构及用户显式限额。文件、频数和大整数会驻留内存，没有实现低内存流式枚举。
+
+默认加解密报告只含公开类别参数，不输出原始哈希、原始精确熵、熵增量或计时。显式 --diagnostics 输出单独的敏感诊断文件；stats 的 SHA-256 也必须显式请求。基准程序只供公开样本使用，它的测量报告本来就包含输入信息。
+
+对 key 和中间字节缓冲区做尽力清零不等于完整运行时保密：Boost 大整数、原始频数结构和其他副本不保证被擦除。长度、公开类和必要熵区间仍可用于候选匹配，某些真实候选集可能只有一个成员。
+
+参考：[OpenSSL AES provider](https://docs.openssl.org/3.6/man7/EVP_CIPHER-AES/)、
+[OpenSSL EVP SIV API](https://docs.openssl.org/3.6/man3/EVP_EncryptInit/#siv-mode)、
+[RFC 8452](https://www.rfc-editor.org/rfc/rfc8452.html)。

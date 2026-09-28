@@ -177,20 +177,18 @@ std::pair<Counts, Bytes> read_private(View raw, std::uint64_t size) {
     return {counts, Bytes(raw.begin() + counts_size, raw.begin() + private_base)};
 }
 Json report(View data, View ciphertext, const Info& info, const std::optional<Bytes>& sidecar) {
-    const auto h = histogram(data), g = histogram(ciphertext);
-    const auto plain_h = entropy(h), cipher_h = entropy(g);
+    (void)data;
+    const auto g = histogram(ciphertext);
     const std::array<const char*, 2> names{"entropy-budget", "exact-histogram"};
     return {{"version", version}, {"profile", info.profile}, {"profile_name", names[info.profile - 1]},
         {"layout", info.layout == Layout::detached ? "detached" : "embedded"},
-        {"entropy_scope", "entire main output file"}, {"plain_bytes", data.size()},
+        {"format", "ECLAB001"}, {"privacy_scope", "legacy per-file frequency spectrum"},
+        {"entropy_scope", "entire main output file"},
         {"cipher_bytes", ciphertext.size()}, {"external_metadata_bytes", sidecar ? sidecar->size() : 0},
         {"total_storage_bytes", ciphertext.size() + (sidecar ? sidecar->size() : 0)},
-        {"plain_entropy_bits_per_byte", plain_h}, {"cipher_entropy_bits_per_byte", cipher_h},
-        {"entropy_delta_bits_per_byte", cipher_h - plain_h},
+        {"cipher_entropy_bits_per_byte", entropy(g)},
         {"budget_bits_per_byte", static_cast<double>(info.budget) / scale},
-        {"exact_normalized_histogram_certificate", normalized_profile(h) == normalized_profile(g)},
-        {"size_multiplier", data.empty() ? Json(nullptr) : Json(static_cast<double>(ciphertext.size()) / static_cast<double>(data.size()))},
-        {"plain_sha256", hex(sha256(data))}, {"cipher_sha256", hex(sha256(ciphertext))},
+        {"cipher_sha256", hex(sha256(ciphertext))},
         {"security_status", "experimental composition; not independently audited"}};
 }
 } // namespace
@@ -347,9 +345,6 @@ Json check_pe(View data) {
     return {{"format", signature == 0x20b ? "PE32+" : "PE32"}, {"machine", machine_hex.str()}, {"sections", sections}};
 }
 
-Encrypted encrypt(View data, View key, const Options& options) {
-    return detail::encrypt_with_nonce(data, key, options, random_bytes(32));
-}
 Encrypted detail::encrypt_with_nonce(View data, View key, const Options& options, View nonce) {
     check_profile(options.profile);
     const auto budget = budget_units(options.budget);
@@ -409,7 +404,7 @@ Encrypted detail::encrypt_with_nonce(View data, View key, const Options& options
     return result;
 }
 
-Decrypted decrypt(View ciphertext, View key, const std::optional<Bytes>& sidecar,
+Decrypted detail::decrypt_legacy(View ciphertext, View key, const std::optional<Bytes>& sidecar,
                   std::size_t max_plain, std::size_t max_cipher) {
     if (ciphertext.size() > max_cipher) throw Error("ciphertext exceeds configured resource limit");
     if (key.size() != 32) throw Error("key file must contain exactly 32 raw bytes");
@@ -481,5 +476,3 @@ Decrypted decrypt(View ciphertext, View key, const std::optional<Bytes>& sidecar
     return {std::move(data), std::move(result_report)};
 }
 } // namespace ecl
-
-

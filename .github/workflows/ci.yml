@@ -17,10 +17,15 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libssl-dev libboost-dev nlohmann-json3-dev
+          sudo apt-get install -y ninja-build curl zip unzip tar pkg-config autoconf automake libtool
+          git clone https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout 07f4812200df3d3c931c0c8a6081d3b21fe2bf9f
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-linux
           -DCMAKE_BUILD_TYPE=${{ matrix.mode == 'release' && 'Release' || 'Debug' }}
           -DECL_SANITIZERS=${{ matrix.mode == 'sanitizers' && 'ON' || 'OFF' }}
       - run: cmake --build build --parallel 2

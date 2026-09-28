@@ -10,6 +10,11 @@
 
 namespace {
 using namespace ecl;
+// Existing v1 regression cases remain an ECLAB001 compatibility suite.
+// Dedicated ECLAB002 policy and transport coverage is registered below.
+Encrypted legacy_encrypt(View data, View key, const Options& options = {}) {
+    return detail::encrypt_with_nonce(data, key, options, random_bytes(32));
+}
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error(std::string("check failed: ") + #condition + " at line " + std::to_string(__LINE__)); } while (false)
 template<class F> void fails(F&& function) {
     bool failed = false;
@@ -107,9 +112,9 @@ void budgets() {
     CHECK(budget_units("8.0000000000000")==8*scale);
     CHECK(budget_units("+2.50e-1")==scale/4);
     CHECK(budget_units("-0")==0);
-    Options options;options.budget="0.1";fails([&]{encrypt(sequence(3),key,options);});
-    options.budget="0";options.profile=0;fails([&]{encrypt(sequence(3),key,options);});
-    options.profile=2;options.layout=static_cast<Layout>(3);fails([&]{encrypt(sequence(3),key,options);});
+    Options options;options.budget="0.1";fails([&]{legacy_encrypt(sequence(3),key,options);});
+    options.budget="0";options.profile=0;fails([&]{legacy_encrypt(sequence(3),key,options);});
+    options.profile=2;options.layout=static_cast<Layout>(3);fails([&]{legacy_encrypt(sequence(3),key,options);});
 }
 void pe_validation() {
     CHECK(check_pe(pe())["format"]=="PE32+");
@@ -120,24 +125,24 @@ void pe_validation() {
     }
 }
 void resources() {
-    Options options;options.max_plain=99;fails([&]{encrypt(Bytes(100),key,options);});
+    Options options;options.max_plain=99;fails([&]{legacy_encrypt(Bytes(100),key,options);});
     options.max_plain=256;options.max_cipher=300;options.layout=Layout::embedded;
-    fails([&]{encrypt(sequence(256),key,options);});
-    fails([&]{decrypt(Bytes(100),key,std::nullopt,256,99);});
-    fails([&]{encrypt(sequence(10),Bytes(31));});
-    fails([&]{decrypt(sequence(10),Bytes(33));});
-    auto encrypted=encrypt(sequence(256),key);
-    fails([&]{decrypt(encrypted.ciphertext,key,encrypted.sidecar,255);});
+    fails([&]{legacy_encrypt(sequence(256),key,options);});
+    fails([&]{detail::decrypt_legacy(Bytes(100),key,std::nullopt,256,99);});
+    fails([&]{legacy_encrypt(sequence(10),Bytes(31));});
+    fails([&]{detail::decrypt_legacy(sequence(10),Bytes(33),std::nullopt);});
+    auto encrypted=legacy_encrypt(sequence(256),key);
+    fails([&]{detail::decrypt_legacy(encrypted.ciphertext,key,encrypted.sidecar,255);});
 }
 void zero_capacity() {
     Options options;options.layout=Layout::embedded;
-    for(const auto& p:std::vector<Bytes>{Bytes{},Bytes{'A'},Bytes(2048,'A')}) fails([&]{encrypt(p,key,options);});
+    for(const auto& p:std::vector<Bytes>{Bytes{},Bytes{'A'},Bytes(2048,'A')}) fails([&]{legacy_encrypt(p,key,options);});
 }
 void all_profiles_layouts() {
     const auto p=pe();
     for(int profile=1;profile<=2;++profile) for(auto layout:{Layout::detached,Layout::embedded}) {
         Options options;options.profile=profile;options.layout=layout;options.budget=profile==2?"0":"0.25";
-        const auto c=encrypt(p,key,options);const auto d=decrypt(c.ciphertext,key,c.sidecar);
+        const auto c=legacy_encrypt(p,key,options);const auto d=detail::decrypt_legacy(c.ciphertext,key,c.sidecar);
         CHECK(d.plaintext==p);CHECK(c.report["cipher_sha256"]==d.report["cipher_sha256"]);
         verify_entropy_policy(histogram(p),histogram(c.ciphertext),profile,budget_units(options.budget));
         if(layout==Layout::detached) {CHECK(c.ciphertext.size()==p.size());CHECK(c.sidecar->size()==2213);}
@@ -149,19 +154,19 @@ void random_roundtrips() {
     for(auto n:{0,1,2,3,16,31,128,255,256,257,1024}) for(int profile:{1,2}) {
         Bytes p(static_cast<std::size_t>(n));for(auto& b:p)b=static_cast<Byte>(rng());
         Options options;options.profile=profile;options.budget=profile==1?"0.1":"0";
-        const auto c=encrypt(p,key,options);CHECK(c.ciphertext.size()==p.size());CHECK(decrypt(c.ciphertext,key,c.sidecar).plaintext==p);
+        const auto c=legacy_encrypt(p,key,options);CHECK(c.ciphertext.size()==p.size());CHECK(detail::decrypt_legacy(c.ciphertext,key,c.sidecar).plaintext==p);
     }
 }
 void constant_inputs() {
     for(int symbol:{0,1,127,255}) {
-        const Bytes p(1024,static_cast<Byte>(symbol));const auto c=encrypt(p,key);
-        CHECK(entropy(histogram(c.ciphertext))==0);CHECK(decrypt(c.ciphertext,key,c.sidecar).plaintext==p);
+        const Bytes p(1024,static_cast<Byte>(symbol));const auto c=legacy_encrypt(p,key);
+        CHECK(entropy(histogram(c.ciphertext))==0);CHECK(detail::decrypt_legacy(c.ciphertext,key,c.sidecar).plaintext==p);
     }
     Options options;options.profile=1;options.budget="1";options.layout=Layout::embedded;
-    const auto c=encrypt(Bytes(4096),key,options);CHECK(decrypt(c.ciphertext,key,c.sidecar).plaintext==Bytes(4096));
+    const auto c=legacy_encrypt(Bytes(4096),key,options);CHECK(detail::decrypt_legacy(c.ciphertext,key,c.sidecar).plaintext==Bytes(4096));
 }
 void nonce_freshness() {
-    const auto a=encrypt(sequence(1024),key),b=encrypt(sequence(1024),key);
+    const auto a=legacy_encrypt(sequence(1024),key),b=legacy_encrypt(sequence(1024),key);
     CHECK(a.ciphertext!=b.ciphertext);CHECK(a.sidecar!=b.sidecar);
     CHECK(!std::equal(a.sidecar->begin()+36,a.sidecar->begin()+68,b.sidecar->begin()+36));
 }
@@ -180,35 +185,35 @@ void regression_vectors() {
         const auto c=detail::encrypt_with_nonce(sequence(1024),key,options,nonce);
         CHECK(hex(sha256(c.ciphertext))==hashes[index++]);
         if(c.sidecar) CHECK(hex(sha256(*c.sidecar))==metas[static_cast<std::size_t>(profile-1)]);
-        CHECK(decrypt(c.ciphertext,key,c.sidecar).plaintext==sequence(1024));
+        CHECK(detail::decrypt_legacy(c.ciphertext,key,c.sidecar).plaintext==sequence(1024));
     }
 }
 void wrong_keys() {
     for(auto layout:{Layout::detached,Layout::embedded}) {
-        Options options;options.layout=layout;const auto c=encrypt(sequence(1024),key,options);
+        Options options;options.layout=layout;const auto c=legacy_encrypt(sequence(1024),key,options);
         bool authentication=false;
-        try{decrypt(c.ciphertext,Bytes(32),c.sidecar);}catch(const AuthenticationError&){authentication=true;}
+        try{detail::decrypt_legacy(c.ciphertext,Bytes(32),c.sidecar);}catch(const AuthenticationError&){authentication=true;}
         CHECK(authentication);
     }
 }
 void tamper() {
-    const auto c=encrypt(sequence(1024),key);
-    for(auto i:{0U,512U,1023U}) {auto bad=c.ciphertext;bad[i]^=1;fails([&]{decrypt(bad,key,c.sidecar);});}
+    const auto c=legacy_encrypt(sequence(1024),key);
+    for(auto i:{0U,512U,1023U}) {auto bad=c.ciphertext;bad[i]^=1;fails([&]{detail::decrypt_legacy(bad,key,c.sidecar);});}
     for(auto i:{0U,8U,9U,10U,11U,12U,20U,28U,36U,68U,99U,100U,1106U,2212U}) {
-        auto bad=*c.sidecar;bad[i]^=1;fails([&]{decrypt(c.ciphertext,key,bad);});
+        auto bad=*c.sidecar;bad[i]^=1;fails([&]{detail::decrypt_legacy(c.ciphertext,key,bad);});
     }
-    auto shortened=c.ciphertext;shortened.pop_back();fails([&]{decrypt(shortened,key,c.sidecar);});
-    auto meta=*c.sidecar;meta.pop_back();fails([&]{decrypt(c.ciphertext,key,meta);});
-    const auto other=encrypt(sequence(1024,1),key);fails([&]{decrypt(c.ciphertext,key,other.sidecar);});
+    auto shortened=c.ciphertext;shortened.pop_back();fails([&]{detail::decrypt_legacy(shortened,key,c.sidecar);});
+    auto meta=*c.sidecar;meta.pop_back();fails([&]{detail::decrypt_legacy(c.ciphertext,key,meta);});
+    const auto other=legacy_encrypt(sequence(1024,1),key);fails([&]{detail::decrypt_legacy(c.ciphertext,key,other.sidecar);});
 }
 void embedded_tamper() {
-    Options options;options.layout=Layout::embedded;const auto c=encrypt(sequence(1024),key,options);
+    Options options;options.layout=Layout::embedded;const auto c=legacy_encrypt(sequence(1024),key,options);
     auto bad=c.ciphertext;
     const auto j=std::find_if(bad.begin()+1,bad.end(),[&](Byte x){return x!=bad[0];});
-    std::iter_swap(bad.begin(),j);CHECK(histogram(bad)==histogram(c.ciphertext));fails([&]{decrypt(bad,key);});
+    std::iter_swap(bad.begin(),j);CHECK(histogram(bad)==histogram(c.ciphertext));fails([&]{detail::decrypt_legacy(bad,key,std::nullopt);});
     auto h=histogram(c.ciphertext);const auto rank=rank_bytes(c.ciphertext,h);--h[0];++h[1];
-    CHECK(rank<multinomial(h));const auto changed=unrank_bytes(rank,h);fails([&]{decrypt(changed,key);});
-    fails([&]{decrypt({},key);});
+    CHECK(rank<multinomial(h));const auto changed=unrank_bytes(rank,h);fails([&]{detail::decrypt_legacy(changed,key,std::nullopt);});
+    fails([&]{detail::decrypt_legacy({},key,std::nullopt);});
 }
 void authenticated_overflow() {
     auto c=detail::encrypt_with_nonce(sequence(256),key,Options{},nonce);
@@ -218,15 +223,15 @@ void authenticated_overflow() {
     auto priv=detail::aes_gcm_decrypt(keys[1],View(nonce).subspan(12,12),View(*c.sidecar).subspan(header_size),aad);
     std::fill(priv.begin(),priv.begin()+8,0xff);
     const auto meta=detail::aes_gcm_encrypt(keys[1],View(nonce).subspan(12,12),priv,aad);
-    const auto invalid=detail::concat({header,meta});fails([&]{decrypt(c.ciphertext,key,invalid);});
+    const auto invalid=detail::concat({header,meta});fails([&]{detail::decrypt_legacy(c.ciphertext,key,invalid);});
 }
 void malformed_inputs() {
     std::mt19937 rng(9831);
     for(int i=0;i<100;++i) {
         Bytes data(static_cast<std::size_t>(rng()%128));for(auto& b:data)b=static_cast<Byte>(rng());
-        fails([&]{decrypt(data,key);});
+        fails([&]{detail::decrypt_legacy(data,key,std::nullopt);});
         Bytes sidecar(sidecar_size);for(auto& b:sidecar)b=static_cast<Byte>(rng());
-        fails([&]{decrypt(data,key,sidecar);});
+        fails([&]{detail::decrypt_legacy(data,key,sidecar);});
     }
 }
 void crypto_primitives() {
@@ -253,6 +258,87 @@ void file_io() {
     } catch (...) {std::filesystem::remove_all(dir);throw;}
     std::filesystem::remove_all(dir);
 }
+Bytes sample_with_entropy(std::size_t size, double target) {
+    std::size_t low = 0, high = size;
+    while (low < high) {
+        const auto mid = low + (high - low) / 2;
+        Counts counts{};
+        counts[0] = size - mid;
+        const auto each = mid / 255, remainder = mid % 255;
+        for (std::size_t i = 1; i < counts.size(); ++i) counts[i] = each + (i <= remainder ? 1 : 0);
+        if (entropy(counts) < target) low = mid + 1;
+        else high = mid;
+    }
+    Bytes out; out.reserve(size);
+    for (std::size_t i = 0; i < size - low; ++i) out.push_back(0);
+    const auto each = low / 255, remainder = low % 255;
+    for (std::size_t i = 1; i < 256; ++i)
+        for (std::size_t j = 0; j < each + (i <= remainder ? 1 : 0); ++j) out.push_back(static_cast<Byte>(i));
+    return out;
+}
+void eclab002_shared_classes() {
+    const auto a = sample_with_entropy(4096, 5.30), b = sample_with_entropy(4096, 5.40);
+    CHECK(histogram(a) != histogram(b));
+    Options options; options.profile = 1; options.budget = "0.25";
+    options.public_template = make_public_template(4096, "5.5");
+    const auto ca = encrypt(a, key, options), cb = encrypt(b, key, options);
+    CHECK(histogram(ca.ciphertext) == histogram(cb.ciphertext));
+    CHECK(histogram(ca.ciphertext) == *options.public_template);
+    CHECK(histogram(cb.ciphertext) == *options.public_template);
+    CHECK(ca.sidecar && cb.sidecar && ca.sidecar->size() == cb.sidecar->size());
+    CHECK(decrypt(ca.ciphertext, key, ca.sidecar).plaintext == a);
+    CHECK(decrypt(cb.ciphertext, key, cb.sidecar).plaintext == b);
+    for (const auto& report : {ca.report, cb.report}) {
+        CHECK(!report.contains("plain_sha256"));
+        CHECK(!report.contains("plain_entropy"));
+        CHECK(!report.contains("entropy_delta"));
+        CHECK(!report.contains("elapsed_seconds"));
+    }
+}
+void eclab002_strict_exact_entropy() {
+    Bytes source{0,0,0,0,1,2,3,4};
+    Counts q{}; q[0] = q[1] = q[2] = q[3] = 2;
+    Options options; options.profile = 2; options.budget = "0"; options.public_template = q;
+    CHECK(std::abs(entropy(histogram(source)) - entropy(q)) < 1e-12);
+    verify_shared_entropy_policy(histogram(source), q, 2, 0);
+    const auto c = encrypt(source, key, options);
+    CHECK(histogram(c.ciphertext) == q);
+    CHECK(decrypt(c.ciphertext, key, c.sidecar).plaintext == source);
+    auto outside = source; outside[7] = 1;
+    fails([&] { encrypt(outside, key, options); });
+}
+void eclab002_authentication() {
+    Options options; options.profile = 1; options.budget = "0.25";
+    options.public_template = make_public_template(4096, "5.5");
+    const auto plain = sample_with_entropy(4096, 5.30);
+    const auto c = encrypt(plain, key, options);
+    bool wrong_key = false;
+    try { (void)decrypt(c.ciphertext, Bytes(32), c.sidecar); }
+    catch (const AuthenticationError&) { wrong_key = true; }
+    CHECK(wrong_key);
+    auto changed = *c.sidecar; changed.back() ^= 1;
+    fails([&] { (void)decrypt(c.ciphertext, key, changed); });
+    auto swapped = c.ciphertext;
+    const auto j = std::find_if(swapped.begin() + 1, swapped.end(), [&](Byte x) { return x != swapped[0]; });
+    std::iter_swap(swapped.begin(), j);
+    CHECK(histogram(swapped) == histogram(c.ciphertext));
+    fails([&] { (void)decrypt(swapped, key, c.sidecar); });
+    auto wrong_histogram = c.ciphertext; wrong_histogram[0] ^= 1;
+    fails([&] { (void)decrypt(wrong_histogram, key, c.sidecar); });
+}
+void eclab002_embedded_roundtrip() {
+    const auto plain = sequence(4096);
+    Options options; options.profile = 1; options.budget = "0.25"; options.layout = Layout::embedded;
+    const auto c = encrypt(plain, key, options);
+    CHECK(!c.sidecar);
+    CHECK(decrypt(c.ciphertext, key).plaintext == plain);
+    auto altered = c.ciphertext;
+    const auto j = std::find_if(altered.begin() + 1, altered.end(), [&](Byte x) { return x != altered[0]; });
+    CHECK(j != altered.end());
+    std::iter_swap(altered.begin(), j);
+    CHECK(histogram(altered) == histogram(c.ciphertext));
+    fails([&] { (void)decrypt(altered, key); });
+}
 }
 int main() {
     const std::vector<std::pair<const char*,std::function<void()>>> tests{
@@ -263,7 +349,11 @@ int main() {
         {"constant inputs",constant_inputs},{"fresh nonces",nonce_freshness},{"ECLAB001 known-answer vectors",regression_vectors},
         {"wrong key authentication",wrong_keys},{"detached tamper and sidecar swap",tamper},{"embedded tamper and histogram binding",embedded_tamper},
         {"authenticated malicious histogram",authenticated_overflow},{"200 malformed artifacts",malformed_inputs},
-        {"SHA-256 and AES-GCM vectors",crypto_primitives},{"atomic file IO and aliases",file_io}};
+        {"SHA-256 and AES-GCM vectors",crypto_primitives},{"atomic file IO and aliases",file_io},
+        {"ECLAB002 shared entropy classes and privacy report",eclab002_shared_classes},
+        {"ECLAB002 exact entropy policy",eclab002_strict_exact_entropy},
+        {"ECLAB002 authenticated tamper rejection",eclab002_authentication},
+        {"ECLAB002 embedded transport roundtrip",eclab002_embedded_roundtrip}};
     int failures=0;
     const auto start=std::chrono::steady_clock::now();
     for(const auto& [name,function]:tests) {
